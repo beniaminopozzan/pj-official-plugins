@@ -3,6 +3,14 @@
 One entry per released version (newest first). Introduced at the version
 below; for earlier releases see the git history of `toolbox_transform_editor/`.
 
+## [1.2.3] - 2026-11-23
+
+### Fixed
+- An open editor no longer keeps a core busy on a long series. The preview was installed again on every
+  tick, which recomputed the function over the whole source each time; it is now installed only when the
+  inputs, the function or the language change, and redrawn once a second in between (immediately after an
+  edit), in the desktop app as in the browser.
+
 ## [1.2.2] - 2026-11-15
 
 ### Fixed

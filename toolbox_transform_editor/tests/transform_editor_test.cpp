@@ -709,7 +709,7 @@ TEST(TransformEditorCreate, ASeriesRecipeStillGoesThroughCreateTransform) {
 }
 
 // The tick that creates also closes the editor: it must not replay the whole source into a preview
-// nobody will see. (Native builds refresh on every tick, so without the guard this tick would.)
+// nobody will see. (The name prompt leaves the form changed, so without the guard this tick would.)
 TEST(TransformEditorCreate, TheCreatingTickRebuildsNoPreview) {
   Rig rig;
   rig.refresh();
@@ -735,6 +735,55 @@ TEST(TransformEditorCreate, AFailedCreateStillRefreshesThePreview) {
   rig.dp.fail_create = true;
   rig.createNamed("dbl");
   EXPECT_EQ(refreshes, 1);
+}
+
+// The preview transform replays the whole source when it is installed, so a refresh with nothing changed only redraws
+// it: the host keeps its output current. A catalog re-read is not a change.
+TEST(TransformEditorPreview, AnUnchangedFormRedrawsWithoutReinstallingThePreview) {
+  Rig rig;
+  rig.refresh();
+  rig.dialog().onItemsDropped("tableSources", {"a/x", "b/y"});
+  rig.dialog().onCodeChanged("functionText", "return value + v1");
+  rig.refresh();
+  const int installs = rig.dp.create_calls;
+  ASSERT_GE(installs, 1);
+  ASSERT_EQ(rig.dp.last_kind, "transform");
+  for (int i = 0; i < 5; ++i) {
+    TransformEditorPreviewTestPeer::tick(rig.editor);
+  }
+  rig.refresh();
+  EXPECT_EQ(rig.dp.create_calls, installs);
+
+  rig.dialog().onCodeChanged("functionText", "return value - v1");
+  rig.refresh();
+  EXPECT_EQ(rig.dp.create_calls, installs + 1) << "a new body is a new transform";
+  rig.dialog().onToggled("pythonButton", true);
+  rig.refresh();
+  EXPECT_EQ(rig.dp.create_calls, installs + 2) << "another language is another script";
+
+  TransformEditorPreviewTestPeer::close(rig.editor);
+  TransformEditorPreviewTestPeer::tick(rig.editor);
+  EXPECT_EQ(rig.dp.create_calls, installs + 3) << "a removed preview is installed again";
+}
+
+// Between edits the dialog's tick refreshes the preview once per kPreviewRefreshTickInterval (20) ticks; after an
+// edit, on the next tick.
+TEST(TransformEditorPreview, TicksRefreshThePreviewAtTheIntervalAndAfterAnEdit) {
+  Rig rig;
+  rig.refresh();
+  rig.dialog().onItemsDropped("tableSources", {"a/x"});
+  rig.dialog().onCodeChanged("functionText", "return value*2");
+  int refreshes = 0;
+  rig.dialog().setOnRefreshPreview([&refreshes]() { ++refreshes; });
+  TransformEditorPreviewTestPeer::deliver(rig.editor);
+  EXPECT_EQ(refreshes, 1) << "the edit";
+  for (int i = 0; i < 40; ++i) {
+    TransformEditorPreviewTestPeer::deliver(rig.editor);
+  }
+  EXPECT_EQ(refreshes, 3);
+  rig.dialog().onCodeChanged("functionText", "return value*3");
+  TransformEditorPreviewTestPeer::deliver(rig.editor);
+  EXPECT_EQ(refreshes, 4);
 }
 
 TEST(TransformEditorCreate, SeveralReturnedSeriesAreNamedNameSlashA) {

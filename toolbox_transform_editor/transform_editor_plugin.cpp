@@ -1145,11 +1145,9 @@ class TransformEditorDialog : public PJ::DialogPluginTyped {
     if (action != PendingCreate::None && pending_close_) {
       return true;
     }
-    // Rebuild immediately after an editor change. Browser builds sample an
-    // otherwise-live source at 1 Hz instead of replaying the complete Luau
-    // transform on every 20 Hz panel tick; native builds retain their existing
-    // every-tick live preview. Streaming output still advances in the host on
-    // every source commit—this cadence only rebuilds the preview snapshot.
+    // Refresh immediately after an editor change, else once per kPreviewRefreshTickInterval ticks: the host
+    // advances the preview transform on every source commit, and a refresh reads the whole source and its
+    // outputs back to draw them.
     ++preview_refresh_ticks_;
     if (preview_dirty_ || preview_refresh_ticks_ >= kPreviewRefreshTickInterval) {
       preview_dirty_ = false;
@@ -2390,11 +2388,7 @@ class TransformEditorDialog : public PJ::DialogPluginTyped {
   bool pending_close_ = false;
   bool preview_dirty_ = false;
   int preview_refresh_ticks_ = 0;
-#ifdef PJ_TARGET_WASM
-  static constexpr int kPreviewRefreshTickInterval = 20;
-#else
-  static constexpr int kPreviewRefreshTickInterval = 1;
-#endif
+  static constexpr int kPreviewRefreshTickInterval = 20;  // 1 Hz at the 20 Hz panel tick
   bool help_requested_ = false;
   std::function<void()> on_save_;
   std::function<void()> on_save_batch_;
@@ -3223,6 +3217,7 @@ class TransformEditorToolbox : public PJ::ToolboxPluginBase {
       (void)dp_view_.remove(preview_key_);
       preview_key_.clear();
     }
+    preview_install_key_.clear();
   }
 
   // Decimated (timestamp, value) samples for one already-resolved field handle.
@@ -3245,7 +3240,7 @@ class TransformEditorToolbox : public PJ::ToolboxPluginBase {
 
   // Resolve several "topic/field" names (or a bare topic) against ONE catalog snapshot in a single pass,
   // returning decimated samples per name (empty if a name did not resolve). The MIMO preview reads the
-  // source ghost + M outputs every tick; a per-name read would re-acquire the snapshot and re-scan the
+  // source ghost + M outputs on every refresh; a per-name read would re-acquire the snapshot and re-scan the
   // whole catalog M+1 times.
   std::vector<std::vector<std::pair<int64_t, double>>> readManyRawSamples(const std::vector<std::string>& names) {
     std::vector<std::vector<std::pair<int64_t, double>>> out(names.size());
@@ -3607,6 +3602,22 @@ class TransformEditorToolbox : public PJ::ToolboxPluginBase {
         derived_recipes::buildTransformScript(preview_id, preview_id, global, body, num_extra, dialog_.language());
     const std::string& script = built.script;
 
+    // The live preview transform already runs this script over these inputs, and the host keeps its output current
+    // as data arrives: only the drawing is refreshed. Installing it again replays the whole source on the main
+    // thread, which pins a core on every refresh once that replay outlasts the refresh period.
+    std::string install_key = script;
+    for (const auto& name : input_topics) {
+      install_key.append(1, '\0').append(name);
+    }
+    for (const auto& name : preview_outputs) {
+      install_key.append(1, '\x01').append(name);
+    }
+    if (!preview_key_.empty() && install_key == preview_install_key_) {
+      dialog_.setValidationError("");  // it was installed, so the host accepted it
+      drawPreview(source, preview_outputs, output_names, num_outputs);
+      return;
+    }
+
     // Evaluate the code FIRST via the SDK (cheap: compile + one test point, no node).
     // Only materialise the live preview node when the script is valid — so a broken
     // function does not create/tear down a transform on every keystroke. The
@@ -3639,7 +3650,14 @@ class TransformEditorToolbox : public PJ::ToolboxPluginBase {
       return;
     }
     preview_key_ = preview_id;
+    preview_install_key_ = std::move(install_key);
+    drawPreview(source, preview_outputs, output_names, num_outputs);
+  }
 
+  // Draw the source (ghost) and the preview transform's outputs, read back from the datastore.
+  void drawPreview(
+      const std::string& source, const std::vector<std::string>& preview_outputs,
+      const std::vector<std::string>& output_names, std::size_t num_outputs) {
     // Read the source (ghost) and each materialised output back from the datastore,
     // and hand the host explicit points to plot. Resolve all of them in ONE catalog
     // pass (readManyRawSamples) — a per-series read would re-scan the whole catalog
@@ -3766,6 +3784,7 @@ class TransformEditorToolbox : public PJ::ToolboxPluginBase {
   bool series_available_ = false;                   // the host materialized a series for a number output
   std::vector<std::string> object_preview_topics_;  // the topics the host resolved for the preview recipe's outputs
   std::string preview_key_;                         // non-empty when an ephemeral preview node is live
+  std::string preview_install_key_;                 // the script, inputs and outputs preview_key_ was installed with
   // The preview of object outputs (see updatePreviewRecipe).
   bool object_preview_live_ = false;      // the ephemeral on_demand recipe is installed
   std::string object_preview_signature_;  // what it was built from (also set when the host refused it)
